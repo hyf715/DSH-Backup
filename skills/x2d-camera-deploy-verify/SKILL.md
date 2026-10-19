@@ -4,8 +4,8 @@ description: Deploy files/services/LUTs to a Hasselblad X2D 100C over ADB or fac
 whenToUse: Use when pushing scripts, binaries, LUT binaries or config to the X2D camera, restarting its init-managed services (x2d-lut-watch, x2d-speed-buff), or validating that a camera-side change actually took effect.
 metadata:
   authoredBy: dsh-self-evolve
-  updatedAt: 2026-10-16T23:54:19.665Z
-  version: 6
+  updatedAt: 2026-10-19T13:43:15.361Z
+  version: 8
   createdAt: 2026-10-15T12:03:53.177Z
 ---
 
@@ -16,6 +16,7 @@ metadata:
 - adb 不可用时用 factory USB（`x2d_play_software.reader()`）：
   - 命令长度上限 ~231B；输出经过非 ASCII 过滤 → **文本一律 base64 拉取**，不要直接 `cat`（中文注释会被吞字节，得到损坏的脚本基线）。
   - 二进制/大文件用 `adb push`；只能走 factory 时先 `tar czf` 压缩再分块 `echo <chunk> | base64 -d` 拼接。
+- `/tmp/cg/deploy_via_factory.py <local> <remote> [--install]` 的两个坑（2026-10-19 实测）：① 不带 `--install` 时它**只解压到暂存 `/data/local/tmp/_up.out`**，不会写 `<remote>`——连续上传多个文件会互相覆盖，必须每次上传后立刻 `cp /data/local/tmp/_up.out <目标>`，或逐文件加 `--install`；② 工厂通道偶发中途超时（`printf %s chunk >>_up.b64` 挂起），脚本每次都会先 `rm -f` 暂存再重传，**直接原样重试**即可，不用清理。
 - 退出码陷阱：`adb shell "cmd; echo rc=$?"` 里的 `$?` 会被**本地** shell 展开，得到的是 adb 的退出码。远程退出码必须写成单引号：`adb shell 'cmd; echo rc=$?'`。
 
 ## 1. 写 /system（ro 分区）
@@ -32,6 +33,7 @@ sync; mount -o remount,ro /system
 ## 2. 重启 init 服务（脚本/二进制改动后必须）
 - init 托管的 `sh 脚本` 一旦启动就按旧代码解释执行：改文件后必须 `setprop ctl.restart <svc>`（如 `x2d-lut-watch`），否则跑的还是旧逻辑。
 - **绝不** stop/start 或 kill `camera-gui`、`weston`、`camera-storage` 之外的相机核心；`camera-storage` 只允许 `ctl.restart`（stop/start 会卡在 stopped → "错误19 无法读取图片"）。`camera-gui` = 相机屏幕，碰它会黑屏。
+- **改 `/system/etc/X2d*.qml` 后不要用 `ctl.restart camera-gui` 刷新**（2026-10-19 实测）：restart 之后新进程里 `libx2d_native_menu.so` 仍被映射，但 Bootstrap 不再加载 → 菜单「自定义」模块与 LUT 抽屉同时消失，且 logcat 零输出，极易误判成文件坏了。正确姿势是"部署 → `reboot` → 验证"；整机重启后注入恢复正常。另注意滤镜列表有两个来源：抽屉读 `LutHud.qml` 的 `catalogExtension`，菜单自定义页读 `X2dSpeedBuffController.qml` 的 `lutCatalog`，两者必须同时部署否则数量不一致。
 - 校验：`getprop init.svc.<name>` 应为 `running`，再 `tail` 该守护的日志确认新配置被读到。
 
 ## 3. 验证（不要只看"命令没报错"）
